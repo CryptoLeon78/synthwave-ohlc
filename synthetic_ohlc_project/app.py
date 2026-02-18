@@ -38,6 +38,14 @@ from core.monkey_filters import (
     evaluar_reglas_años_positivos,
     meta_regla_simple,
 )
+from core.ensemble import (
+    ensemble_mean,
+    ensemble_median,
+    ensemble_returns,
+    plot_ensemble_comparison,
+    compute_ensemble_bands,
+    plot_ensemble_bands,
+)
 
 # ──────────────────────────────────────────────
 # Page config
@@ -103,10 +111,11 @@ col_c.metric("Forward", f"{len(df_forward)} filas")
 # ──────────────────────────────────────────────
 # Tabs
 # ──────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📊 Vectores Referenciados",
     "🔄 Bootstrap Individual",
     "🚀 Generación Masiva",
+    "🧩 Ensemble",
     "🐒 Monkey Test",
     "📅 Análisis Anual & Filtros",
 ])
@@ -241,9 +250,70 @@ with tab3:
             st.download_button(f"📥 Descargar {selected}", csv_buf, file_name=f"{selected}.csv", mime="text/csv")
 
 # ──────────────────────────────────────────────
-# Tab 4: Monkey Test
+# Tab 4: Ensemble
 # ──────────────────────────────────────────────
 with tab4:
+    st.subheader("🧩 Ensamblado (Ensemble) de Sintéticas")
+
+    if "mass_results" not in st.session_state or not st.session_state["mass_results"]:
+        st.warning("Primero genera múltiples sintéticas en la pestaña 'Generación Masiva'.")
+    else:
+        results = st.session_state["mass_results"]
+        df_is_local = st.session_state["df_is"]
+
+        st.info(f"Sintéticas disponibles para ensamblar: {len(results)} → {list(results.keys())}")
+
+        c1, c2 = st.columns(2)
+        ens_method = c1.selectbox("Método de ensemble", ["mean", "median", "returns"])
+        lower_pct = c2.slider("Percentil inferior (bandas)", 1.0, 25.0, 5.0, 1.0)
+        upper_pct = c2.slider("Percentil superior (bandas)", 75.0, 99.0, 95.0, 1.0)
+
+        if st.button("🧩 Construir Ensemble", key="build_ensemble"):
+            with st.spinner("Ensamblando..."):
+                try:
+                    if ens_method == "mean":
+                        ensemble_df = ensemble_mean(results)
+                    elif ens_method == "median":
+                        ensemble_df = ensemble_median(results)
+                    else:
+                        init_p = float(df_is_local[price_col].iloc[0])
+                        ensemble_df = ensemble_returns(results, init_p, price_col=price_col)
+
+                    st.session_state["ensemble_df"] = ensemble_df
+
+                    # Comparación visual
+                    fig, metrics = plot_ensemble_comparison(
+                        df_is_local, results, ensemble_df, price_col=price_col,
+                    )
+                    st.pyplot(fig)
+
+                    mc1, mc2, mc3 = st.columns(3)
+                    mc1.metric("K-S p-value", f"{metrics['ks_pvalue']:.4f}")
+                    mc2.metric("ACF Retornos", f"{metrics['ret_correlation']:.4f}")
+                    mc3.metric("ACF Retornos²", f"{metrics['sq_correlation']:.4f}")
+
+                    # Bandas de confianza
+                    st.markdown("---")
+                    st.subheader("Bandas de Confianza")
+                    bands = compute_ensemble_bands(results, price_col=price_col,
+                                                   lower_pct=lower_pct, upper_pct=upper_pct)
+                    fig_bands = plot_ensemble_bands(df_is_local, bands, price_col=price_col)
+                    st.pyplot(fig_bands)
+
+                    # Descargar ensemble
+                    csv_ens = ensemble_df.to_csv()
+                    st.download_button(
+                        "📥 Descargar Ensemble CSV", csv_ens,
+                        file_name=f"ensemble_{ens_method}.csv", mime="text/csv",
+                    )
+
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+# ──────────────────────────────────────────────
+# Tab 5: Monkey Test
+# ──────────────────────────────────────────────
+with tab5:
     st.subheader("Monkey Test — Simulación OOS")
 
     if len(df_oos) < 5:
@@ -266,9 +336,9 @@ with tab4:
                     st.error(f"Error: {e}")
 
 # ──────────────────────────────────────────────
-# Tab 5: Annual analysis & filters
+# Tab 6: Annual analysis & filters
 # ──────────────────────────────────────────────
-with tab5:
+with tab6:
     st.subheader("Rendimientos anuales y filtros")
 
     try:

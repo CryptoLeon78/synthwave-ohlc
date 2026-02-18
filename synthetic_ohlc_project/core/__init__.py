@@ -26,3 +26,12 @@ from .monkey_filters import (
     evaluar_reglas_años_positivos,
     meta_regla_simple,
 )
+from .ensemble import (
+    ensemble_mean,
+    ensemble_median,
+    ensemble_returns,
+    ensemble_target_signals,
+    plot_ensemble_comparison,
+    compute_ensemble_bands,
+    plot_ensemble_bands,
+)
