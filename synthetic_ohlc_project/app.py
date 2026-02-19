@@ -85,11 +85,31 @@ if uploaded_file is None:
     st.stop()
 
 try:
-    raw_df = pd.read_csv(uploaded_file)
+    # Detectar separador
+    uploaded_file.seek(0)
+    first_line = uploaded_file.readline().decode("utf-8")
+    sep = "\t" if "\t" in first_line else ","
+    uploaded_file.seek(0)
+
+    raw_df = pd.read_csv(uploaded_file, sep=sep)
+
+    # Normalizar columnas MT5 (<DATE>, <TIME>, <OPEN>...)
+    raw_df.columns = raw_df.columns.str.strip().str.replace(r'[<>]', '', regex=True).str.strip().str.capitalize()
+    raw_df.rename(columns={"Tickvol": "Volume", "Vol": "Volume"}, inplace=True)
+
+    # Combinar Date + Time si vienen separadas
+    if "Date" in raw_df.columns and "Time" in raw_df.columns:
+        raw_df["Date"] = pd.to_datetime(
+            raw_df["Date"].astype(str) + " " + raw_df["Time"].astype(str)
+        )
+        raw_df.drop(columns=["Time"], inplace=True)
+
     if date_col in raw_df.columns:
         raw_df[date_col] = pd.to_datetime(raw_df[date_col])
         raw_df = raw_df.set_index(date_col).sort_index()
+
     raw_df["Target"] = (raw_df["Open"].shift(-2) - raw_df["Open"].shift(-1)) / raw_df["Open"].shift(-1)
+
 except Exception as e:
     st.error(f"Error leyendo CSV: {e}")
     st.stop()
