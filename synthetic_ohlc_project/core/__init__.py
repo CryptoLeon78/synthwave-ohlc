@@ -35,3 +35,4 @@ from .ensemble import (
     compute_ensemble_bands,
     plot_ensemble_bands,
 )
+from .adverse_test import adverse_test_returns, adverse_test_monkey

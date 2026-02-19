@@ -12,6 +12,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import io
+import zipfile
 import matplotlib
 matplotlib.use("Agg")
 
@@ -42,10 +43,12 @@ from core.ensemble import (
     ensemble_mean,
     ensemble_median,
     ensemble_returns,
+    ensemble_target_signals,
     plot_ensemble_comparison,
     compute_ensemble_bands,
     plot_ensemble_bands,
 )
+from core.adverse_test import adverse_test_returns, adverse_test_monkey
 
 # ──────────────────────────────────────────────
 # Page config
@@ -81,7 +84,6 @@ if uploaded_file is None:
     st.info("⬆️ Sube un archivo CSV con columnas: Date, Open, High, Low, Close")
     st.stop()
 
-# Read CSV into DataFrame
 try:
     raw_df = pd.read_csv(uploaded_file)
     if date_col in raw_df.columns:
@@ -94,7 +96,6 @@ except Exception as e:
 
 st.success(f"✓ {len(raw_df)} filas cargadas — {raw_df.index.min()} → {raw_df.index.max()}")
 
-# Split
 try:
     df_is, df_oos, df_forward = split_dataset(raw_df, is_end, oos_end)
 except Exception as e:
@@ -111,11 +112,12 @@ col_c.metric("Forward", f"{len(df_forward)} filas")
 # ──────────────────────────────────────────────
 # Tabs
 # ──────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📊 Vectores Referenciados",
     "🔄 Bootstrap Individual",
     "🚀 Generación Masiva",
     "🧩 Ensemble",
+    "⚔️ Test Adverso",
     "🐒 Monkey Test",
     "📅 Análisis Anual & Filtros",
 ])
@@ -180,7 +182,6 @@ with tab2:
                 mc2.metric("ACF Retornos", f"{metrics['ret_correlation']:.4f}")
                 mc3.metric("ACF Retornos²", f"{metrics['sq_correlation']:.4f}")
 
-                # Download
                 csv_buf = synth.to_csv()
                 st.download_button("📥 Descargar CSV", csv_buf, file_name=f"synthetic_{method}_{seed}.csv", mime="text/csv")
 
@@ -281,7 +282,6 @@ with tab4:
 
                     st.session_state["ensemble_df"] = ensemble_df
 
-                    # Comparación visual
                     fig, metrics = plot_ensemble_comparison(
                         df_is_local, results, ensemble_df, price_col=price_col,
                     )
@@ -310,10 +310,179 @@ with tab4:
                 except Exception as e:
                     st.error(f"Error: {e}")
 
+        # ── Votación de señales Target ──
+        st.markdown("---")
+        st.subheader("🗳️ Votación de Señales Target")
+        st.caption("Combina las predicciones Target de múltiples sintéticas por votación.")
+
+        vote_threshold = st.slider("Umbral de consenso (proporción mínima)", 0.1, 0.9, 0.5, 0.05, key="vote_thresh")
+
+        if st.button("🗳️ Calcular Votación", key="calc_vote"):
+            with st.spinner("Calculando votación..."):
+                try:
+                    # Añadir Target a sintéticas si no existe
+                    results_with_target = {}
+                    for k, sdf in results.items():
+                        sdf_copy = sdf.copy()
+                        if "Target" not in sdf_copy.columns:
+                            sdf_copy["Target"] = (sdf_copy["Open"].shift(-2) - sdf_copy["Open"].shift(-1)) / sdf_copy["Open"].shift(-1)
+                        results_with_target[k] = sdf_copy
+
+                    signals_df = ensemble_target_signals(results_with_target, threshold=vote_threshold)
+                    st.session_state["ensemble_signals"] = signals_df
+
+                    c1, c2, c3 = st.columns(3)
+                    n_pos = int(signals_df["ensemble_signal"].sum())
+                    c1.metric("Señales positivas", f"{n_pos}/{len(signals_df)}")
+                    c2.metric("Ratio medio votos", f"{signals_df['vote_ratio'].mean():.3f}")
+                    c3.metric("Target medio ensemble", f"{signals_df['avg_target'].mean():.6f}")
+
+                    st.dataframe(signals_df.head(20), use_container_width=True)
+
+                    # Rendimiento con señal
+                    if "Target" in df_is_local.columns:
+                        aligned = signals_df["ensemble_signal"].reindex(df_is_local.index).fillna(0)
+                        ret_signal = df_is_local["Target"].fillna(0) * aligned
+                        cum_ret = float((1 + ret_signal).prod() - 1)
+                        st.metric("Rendimiento acumulado con señal de votación", f"{cum_ret:.4f}")
+
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+        # ── ZIP download ──
+        st.markdown("---")
+        st.subheader("📦 Descargar Todo en ZIP")
+
+        if st.button("📦 Generar ZIP", key="gen_zip"):
+            with st.spinner("Creando archivo ZIP..."):
+                try:
+                    zip_buffer = io.BytesIO()
+                    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                        # Sintéticas
+                        for name, sdf in results.items():
+                            zf.writestr(f"{name}.csv", sdf.to_csv())
+
+                        # Ensemble
+                        if "ensemble_df" in st.session_state:
+                            zf.writestr(f"ensemble_{ens_method}.csv", st.session_state["ensemble_df"].to_csv())
+
+                        # Señales de votación
+                        if "ensemble_signals" in st.session_state:
+                            zf.writestr("ensemble_signals.csv", st.session_state["ensemble_signals"].to_csv())
+
+                    zip_buffer.seek(0)
+                    st.download_button(
+                        "📥 Descargar ZIP completo",
+                        zip_buffer.getvalue(),
+                        file_name="synthetic_ohlc_bundle.zip",
+                        mime="application/zip",
+                    )
+                    st.success(f"✓ ZIP con {len(results)} sintéticas listo para descarga")
+
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
 # ──────────────────────────────────────────────
-# Tab 5: Monkey Test
+# Tab 5: Adverse Test
 # ──────────────────────────────────────────────
 with tab5:
+    st.subheader("⚔️ Test Adverso de Robustez")
+
+    if "mass_results" not in st.session_state or not st.session_state["mass_results"]:
+        st.warning("Primero genera múltiples sintéticas en la pestaña 'Generación Masiva'.")
+    else:
+        results = st.session_state["mass_results"]
+        df_is_local = st.session_state["df_is"]
+
+        st.markdown("### Test Adverso por Señal")
+        st.caption("Evalúa si una señal/estrategia es robusta comparando rendimientos en original vs sintéticas.")
+
+        adv_rules = st.text_area(
+            "Reglas de señal (formato pandas query, una por línea)",
+            value="close_relative > 0",
+            height=80,
+            key="adv_rules",
+        )
+
+        if st.button("⚔️ Ejecutar Test Adverso", key="run_adverse"):
+            with st.spinner("Ejecutando test adverso..."):
+                try:
+                    # Generar señal desde reglas
+                    if "ref_vectors" in st.session_state:
+                        eval_df = st.session_state["ref_vectors"].copy()
+                        eval_df["Target"] = df_is_local["Target"].reindex(eval_df.index)
+                        eval_df = eval_df.dropna(subset=["Target"])
+
+                        rules = [r.strip() for r in adv_rules.strip().split("\n") if r.strip()]
+                        signal = pd.Series(False, index=eval_df.index)
+                        for rule in rules:
+                            try:
+                                signal = signal | eval_df.eval(rule)
+                            except Exception:
+                                pass
+                        signal = signal.astype(int)
+
+                        # Necesitamos original con Target
+                        orig_with_target = df_is_local.copy()
+
+                        # Añadir Target a sintéticas
+                        results_t = {}
+                        for k, sdf in results.items():
+                            sc = sdf.copy()
+                            if "Target" not in sc.columns:
+                                sc["Target"] = (sc["Open"].shift(-2) - sc["Open"].shift(-1)) / sc["Open"].shift(-1)
+                            results_t[k] = sc
+
+                        fig, stats = adverse_test_returns(
+                            orig_with_target, results_t, signal,
+                        )
+                        st.pyplot(fig)
+
+                        c1, c2, c3 = st.columns(3)
+                        c1.metric("Rendimiento Original", f"{stats['original_return']:.4f}")
+                        c2.metric("Percentil", f"{stats['percentile_rank']:.1f}%")
+                        c3.metric("Veredicto", "✅ Robusta" if stats["is_robust"] else "❌ No robusta")
+                    else:
+                        st.warning("Genera vectores referenciados primero.")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+        st.markdown("---")
+        st.markdown("### Test Adverso Monkey")
+        st.caption("Genera señales aleatorias y compara comportamiento en original vs sintéticas.")
+
+        c1, c2 = st.columns(2)
+        n_rand = c1.number_input("Nº señales aleatorias", value=500, min_value=50, step=50, key="n_rand_adv")
+        sig_dens = c2.slider("Densidad de señal", 0.1, 0.9, 0.5, 0.05, key="sig_dens")
+
+        if st.button("🐒 Ejecutar Monkey Adverso", key="run_monkey_adv"):
+            with st.spinner("Simulando..."):
+                try:
+                    orig_t = df_is_local.copy()
+                    results_t = {}
+                    for k, sdf in results.items():
+                        sc = sdf.copy()
+                        if "Target" not in sc.columns:
+                            sc["Target"] = (sc["Open"].shift(-2) - sc["Open"].shift(-1)) / sc["Open"].shift(-1)
+                        results_t[k] = sc
+
+                    fig, stats = adverse_test_monkey(
+                        orig_t, results_t,
+                        n_random_signals=n_rand,
+                        signal_density=sig_dens,
+                    )
+                    st.pyplot(fig)
+
+                    c1, c2 = st.columns(2)
+                    c1.metric("Correlación Orig↔Sint", f"{stats['correlation_orig_synth']:.3f}")
+                    c2.metric("Comportamiento similar", "✅ Sí" if stats["similar_behavior"] else "❌ No")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+# ──────────────────────────────────────────────
+# Tab 6: Monkey Test
+# ──────────────────────────────────────────────
+with tab6:
     st.subheader("Monkey Test — Simulación OOS")
 
     if len(df_oos) < 5:
@@ -336,9 +505,9 @@ with tab5:
                     st.error(f"Error: {e}")
 
 # ──────────────────────────────────────────────
-# Tab 6: Annual analysis & filters
+# Tab 7: Annual analysis & filters
 # ──────────────────────────────────────────────
-with tab6:
+with tab7:
     st.subheader("Rendimientos anuales y filtros")
 
     try:
@@ -367,7 +536,6 @@ with tab6:
         if st.button("Evaluar reglas"):
             rules = [r.strip() for r in rules_text.strip().split("\n") if r.strip()]
             if "ref_vectors" in st.session_state:
-                # Merge ref_vectors with Target for evaluation
                 eval_df = st.session_state["ref_vectors"].copy()
                 eval_df["Target"] = df_is_local["Target"].reindex(eval_df.index)
                 eval_df = eval_df.dropna(subset=["Target"])
